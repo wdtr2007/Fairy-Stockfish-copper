@@ -93,6 +93,7 @@ struct Variant {
   bool pieceDrops = false;
   bool dropLoop = false;
   bool capturesToHand = false;
+  bool transporterSquares = false;
   bool firstRankPawnDrops = false;
   bool promotionZonePawnDrops = false;
   EnclosingRule enclosingDrop = NO_ENCLOSING;
@@ -166,7 +167,6 @@ struct Variant {
   // Derived properties
   bool fastAttacks = true;
   bool fastAttacks2 = true;
-  bool fastLegal = true;
   std::string nnueAlias = "";
   PieceType nnueKing = KING;
   int nnueDimensions;

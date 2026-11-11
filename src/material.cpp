@@ -89,8 +89,7 @@ namespace {
   }
 
   bool is_KXKX(const Position& pos, Color us) {
-    return    pos.non_pawn_material(us) - pos.non_pawn_material(~us) > QueenValueMg
-          && pos.count<ALL_PIECES>(~us) - pos.count<PAWN>(~us) <= 2; // weak side: king, pawns and at most one piece
+    return  pos.non_pawn_material(us) - pos.non_pawn_material(~us) > QueenValueMg;
   }
 
   bool is_KBPsK(const Position& pos, Color us) {
@@ -180,7 +179,7 @@ Entry* probe(const Position& pos) {
       for (PieceSet ps = pos.piece_types(); ps;)
       {
           PieceType pt = pop_lsb(ps);
-          npm2 += pos.count_in_hand(pt) * PieceValue[MG][make_piece(WHITE, pt)];
+          npm2 += pos.count_with_transporter(pt) * PieceValue[MG][make_piece(WHITE, pt)];
       }
       e->gamePhase = Phase(PHASE_MIDGAME * npm / std::max(int(npm + npm2), 1));
       int countAll = pos.count_with_hand(WHITE, ALL_PIECES) + pos.count_with_hand(BLACK, ALL_PIECES);

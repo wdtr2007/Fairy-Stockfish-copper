@@ -186,6 +186,7 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states,
   main()->stopOnPonderhit = stop = abort = false;
   increaseDepth = true;
   main()->ponder = ponderMode;
+  main()->lastBestMove = MOVE_NONE;
   Search::Limits = limits;
   Search::RootMoves rootMoves;
 

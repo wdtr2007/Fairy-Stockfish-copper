@@ -167,7 +167,7 @@ namespace Eval {
         if (useNNUE)
             sync_cout << "info string NNUE evaluation using " << eval_file_loaded << " enabled" << sync_endl;
         else
-            sync_cout << "info string classical evaluation enabled" << sync_endl;
+            sync_cout << "info string classical evaluation enabled NNUE not in use" << sync_endl;
     }
   }
 }
@@ -628,13 +628,13 @@ namespace {
 
     Score score = SCORE_ZERO;
 
-    if (pos.count_in_hand(Us, pt) > 0 && pt != KING)
+    if (pos.count_with_transporter(Us, pt) > 0 && pt != KING)
     {
         Bitboard b = pos.drop_region(Us, pt) & ~pos.pieces() & (~attackedBy2[Them] | attackedBy[Us][ALL_PIECES]);
         if ((b & kingRing[Them]) && pt != SHOGI_PAWN)
         {
-            kingAttackersCountInHand[Us] += pos.count_in_hand(Us, pt);
-            kingAttackersWeightInHand[Us] += KingAttackWeights[std::min(pt, FAIRY_PIECES)] * pos.count_in_hand(Us, pt);
+            kingAttackersCountInHand[Us] += pos.count_with_transporter(Us, pt);
+            kingAttackersWeightInHand[Us] += KingAttackWeights[std::min(pt, FAIRY_PIECES)] * pos.count_with_transporter(Us, pt);
             kingAttacksCount[Us] += popcount(b & attackedBy[Them][KING]);
         }
         Bitboard theirHalf = pos.board_bb() & ~forward_ranks_bb(Them, relative_rank(Them, Rank((pos.max_rank() - 1) / 2), pos.max_rank()));
@@ -643,7 +643,7 @@ namespace {
         // Bonus for Kyoto shogi style drops of promoted pieces
         if (pos.promoted_piece_type(pt) != NO_PIECE_TYPE && pos.drop_promoted())
             score += make_score(std::max(PieceValue[MG][pos.promoted_piece_type(pt)] - PieceValue[MG][pt], VALUE_ZERO),
-                                std::max(PieceValue[EG][pos.promoted_piece_type(pt)] - PieceValue[EG][pt], VALUE_ZERO)) / 4 * pos.count_in_hand(Us, pt);
+                                std::max(PieceValue[EG][pos.promoted_piece_type(pt)] - PieceValue[EG][pt], VALUE_ZERO)) / 4 * pos.count_with_transporter(Us, pt);
 
         // Mobility bonus for reversi variants
         if (pos.enclosing_drop())
@@ -695,7 +695,7 @@ namespace {
     b2 = attacks_bb<BISHOP>(ksq, pos.pieces() ^ pos.pieces(Us, QUEEN));
 
     std::function <Bitboard (Color, PieceType)> get_attacks = [this](Color c, PieceType pt) {
-        return attackedBy[c][pt] | (pos.piece_drops() && pos.count_in_hand(c, pt) > 0 ? pos.drop_region(c, pt) & ~pos.pieces() : Bitboard(0));
+        return attackedBy[c][pt] | (pos.piece_drops() && pos.count_with_transporter(c, pt) > 0 ? pos.drop_region(c, pt) & ~pos.pieces() : Bitboard(0));
     };
     for (PieceSet ps = pos.piece_types(); ps;)
     {
@@ -725,7 +725,7 @@ namespace {
                 unsafeChecks |= knightChecks;
             break;
         case PAWN:
-            if (pos.piece_drops() && pos.count_in_hand(Them, pt) > 0)
+            if (pos.piece_drops() && pos.count_with_transporter(Them, pt) > 0)
             {
                 pawnChecks = attacks_bb(Us, pt, ksq, pos.pieces()) & ~pos.pieces() & pos.board_bb();
                 if (pawnChecks & safe)
@@ -762,7 +762,7 @@ namespace {
         for (PieceSet ps = pos.piece_types(); ps;)
         {
             PieceType pt = pop_lsb(ps);
-            if (pos.count_in_hand(Them, pt) <= 0 && (attacks_bb(Us, pt, ksq, pos.pieces()) & safe & pos.drop_region(Them, pt) & ~pos.pieces()))
+            if (pos.count_with_transporter(Them, pt) <= 0 && (attacks_bb(Us, pt, ksq, pos.pieces()) & safe & pos.drop_region(Them, pt) & ~pos.pieces()))
             {
                 kingDanger += VirtualCheck * 500 / (500 + PieceValue[MG][pt]);
                 // Presumably a mate threat
@@ -1414,27 +1414,6 @@ namespace {
     // Compute the scale factor for the winning side
     Color strongSide = eg > VALUE_DRAW ? WHITE : BLACK;
     int sf = me->scale_factor(pos, strongSide);
-
-    if (pos.variant()->endgameEval == EG_EVAL_MISERE)
-    {
-        // Forcing a selfmate requires plenty of own material, so scale down
-        // with decreasing material. A bare king can never give mate.
-        int material = pos.non_pawn_material(strongSide) + pos.count<PAWN>(strongSide) * PawnValueEg;
-        sf = pos.count<ALL_PIECES>(~strongSide) == 1 ? int(SCALE_FACTOR_DRAW)
-           : std::min(int(SCALE_FACTOR_NORMAL), int(SCALE_FACTOR_NORMAL) * material / (MidgameLimit / 2));
-
-        // Same drawishness criteria as in the KXKX misere endgame: weak pawns on
-        // their seventh rank cannot be forced to mate, and a single mating pawn
-        // needs a strong minor piece or pawn to complete the mating net.
-        // Other weak pieces can still give mate, so scale down less then.
-        Bitboard matingPawns = pos.pieces(~strongSide, PAWN) & ~rank_bb(relative_rank(~strongSide, RANK_7, pos.max_rank()));
-        if (!matingPawns || (!more_than_one(matingPawns) && !pos.pieces(strongSide, BISHOP, KNIGHT, PAWN)))
-            sf = std::min(sf, int(SCALE_FACTOR_NORMAL) / (pos.count<ALL_PIECES>(~strongSide) == pos.count<PAWN>(~strongSide) + 1 ? 16 : 4));
-
-        // In misere the scale factor judges whether a selfmate can be forced at all,
-        // which matters in every game phase
-        mg = mg * ScaleFactor(sf) / SCALE_FACTOR_NORMAL;
-    }
 
     // If scale factor is not already specific, scale up/down via general heuristics
     if (sf == SCALE_FACTOR_NORMAL && !pos.captures_to_hand() && !pos.material_counting())

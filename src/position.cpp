@@ -31,10 +31,20 @@
 #include "tt.h"
 #include "uci.h"
 #include "syzygy/tbprobe.h"
-
 using std::string;
 
 namespace Stockfish {
+
+namespace {
+
+char sfen_piece_char(char piece) {
+  unsigned char c = static_cast<unsigned char>(piece);
+  return islower(c) ? char(toupper(c))
+       : isupper(c) ? char(tolower(c))
+                    : piece;
+}
+
+}
 
 namespace Zobrist {
 
@@ -43,15 +53,30 @@ namespace Zobrist {
   Key castling[CASTLING_RIGHT_NB];
   Key side, noPawns;
   Key inHand[PIECE_NB][SQUARE_NB];
+  Key transporter[PIECE_NB][PIECE_NB];
   Key checks[COLOR_NB][CHECKS_NB];
   Key wall[SQUARE_NB];
   Key endgame[EG_EVAL_NB];
 }
 
 
-/// operator<<(Position) returns an ASCII representation of the position
+/// print_position() returns an ASCII representation of the position
 
-std::ostream& operator<<(std::ostream& os, const Position& pos) {
+std::ostream& print_position(std::ostream& os, const Position& pos, bool usiCoordinates) {
+
+  const auto squareName = [&pos, usiCoordinates](Square s) {
+      if (!usiCoordinates)
+          return UCI::square(pos, s);
+      if (pos.has_transporter_squares())
+      {
+          if (s == black_transporter_square())
+              return std::string("y8");
+          if (s == white_transporter_square())
+              return std::string("z0");
+      }
+      return std::to_string(pos.max_file() - file_of(s) + 1)
+           + char('a' + pos.max_rank() - rank_of(s));
+  };
 
   os << "\n ";
   for (File f = FILE_A; f <= pos.max_file(); ++f)
@@ -70,11 +95,16 @@ std::ostream& operator<<(std::ostream& os, const Position& pos) {
           else
               os << " | " << pos.piece_to_char()[pos.piece_on(make_square(f, r))];
 
+      if (usiCoordinates)
+          os << " |" << char('a' + pos.max_rank() - r);
+      else
+      {
 #ifdef LARGEBOARDS
-      os << " |" << (pos.max_rank() == RANK_10 && CurrentProtocol != UCI_GENERAL ? r : 1 + r);
+          os << " |" << (pos.max_rank() == RANK_10 && CurrentProtocol != UCI_GENERAL ? r : 1 + r);
 #else
-      os << " |" << (1 + r);
+          os << " |" << (1 + r);
 #endif
+      }
       if (r == pos.max_rank() || r == RANK_1)
       {
           Color c = r == RANK_1 ? WHITE : BLACK;
@@ -96,21 +126,57 @@ std::ostream& operator<<(std::ostream& os, const Position& pos) {
       os << "+\n";
   }
 
+  // added extra space for the coordinates to line up with the board
+  os << "!";
   for (File f = FILE_A; f <= pos.max_file(); ++f)
-      os << "   " << char('a' + f);
+      if (usiCoordinates)
+          os << ' ' << std::setw(3) << (pos.max_file() - f + 1);
+      else
+          os << "   " << char('a' + f);
   os << "\n";
   os << "\nFen: " << pos.fen() << "\nSfen: " << pos.fen(true) << "\nKey: " << std::hex << std::uppercase
      << std::setfill('0') << std::setw(16) << pos.key()
      << std::setfill(' ') << std::dec << "\nCheckers: ";
 
   for (Bitboard b = pos.checkers(); b; )
-      os << UCI::square(pos, pop_lsb(b)) << " ";
+      os << squareName(pop_lsb(b)) << " ";
 
   os << "\nChased: ";
   for (Bitboard b = pos.state()->chased; b; )
-      os << UCI::square(pos, pop_lsb(b)) << " ";
+      os << squareName(pop_lsb(b)) << " ";
+
+  if (pos.has_transporter_squares())
+  {
+      os << "\nTransporters: ";
+      for (Color c : {WHITE, BLACK})
+      {
+          if (c == BLACK)
+              os << ", ";
+          os << (c == WHITE ? "White" : "Black");
+          if (usiCoordinates)
+              os << " transporter square: " << squareName(pos.transporter_square(c));
+          os << " [";
+          Color owner = pos.transporter_owner(c);
+          Piece pc = pos.transporter_piece(owner);
+          if (pc)
+          {
+              Piece base = pos.transporter_unpromoted_piece(owner);
+              char piece = pos.piece_to_char()[base ? base : pc];
+              if (pos.variant()->variantTemplate != "shogi")
+                  piece = sfen_piece_char(piece);
+              if (base)
+                  os << '+' << piece;
+              else
+                  os << piece;
+          }
+          else
+              os << '-';
+          os << ']';
+      }
+  }
 
   if (    int(Tablebases::MaxCardinality) >= popcount(pos.pieces())
+      && Options["UCI_Variant"] == "chess"
       && !pos.can_castle(ANY_CASTLING))
   {
       StateInfo st;
@@ -126,6 +192,10 @@ std::ostream& operator<<(std::ostream& os, const Position& pos) {
   }
 
   return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const Position& pos) {
+  return print_position(os, pos, false);
 }
 
 
@@ -180,6 +250,10 @@ void Position::init() {
       for (PieceType pt = PAWN; pt <= KING; ++pt)
           for (int n = 0; n < SQUARE_NB; ++n)
               Zobrist::inHand[make_piece(c, pt)][n] = rng.rand<Key>();
+
+  for (Piece pc = W_PAWN; pc < PIECE_NB; ++pc)
+      for (Piece base = NO_PIECE; base < PIECE_NB; ++base)
+          Zobrist::transporter[pc][base] = rng.rand<Key>();
 
   for (Square s = SQ_A1; s <= SQ_MAX; ++s)
       Zobrist::wall[s] = rng.rand<Key>();
@@ -318,7 +392,8 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
           ++sq;
       }
 
-      else if ((idx = piece_to_char().find(token)) != string::npos || (idx = piece_to_char_synonyms().find(token)) != string::npos)
+      else if ((idx = piece_to_char().find(token)) != string::npos
+            || (idx = piece_to_char_synonyms().find(token)) != string::npos)
       {
           if (ss.peek() == '~')
               ss >> token;
@@ -327,7 +402,8 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       }
 
       // Promoted shogi pieces
-      else if (token == '+' && (idx = piece_to_char().find(ss.peek())) != string::npos && promoted_piece_type(type_of(Piece(idx))))
+      else if (token == '+' && (idx = piece_to_char().find(char(ss.peek()))) != string::npos
+            && promoted_piece_type(type_of(Piece(idx))))
       {
           ss >> token;
           put_piece(make_piece(color_of(Piece(idx)), promoted_piece_type(type_of(Piece(idx)))), sq, true, Piece(idx));
@@ -336,17 +412,57 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
   }
   // Pieces in hand
   if (!isspace(token))
-      while ((ss >> token) && !isspace(token))
+  {
+      bool readingTransporter = false;
+      while (token == '[')
       {
-          if (token == ']')
-              continue;
-          else if ((idx = piece_to_char().find(token)) != string::npos)
-              add_to_hand(Piece(idx));
+          bool promotedTransporter = false;
+          while ((ss >> token) && token != ']')
+          {
+              if (token == '+')
+              {
+                  promotedTransporter = true;
+                  continue;
+              }
+
+              if (token == '-')
+                  continue;
+
+              if ((idx = piece_to_char().find(token)) != string::npos)
+              {
+                  Piece base = Piece(idx);
+                  if (readingTransporter && has_transporter_squares())
+                  {
+                      Piece transporterBase = base;
+                      Piece pc = promotedTransporter && promoted_piece_type(type_of(base))
+                               ? make_piece(color_of(base), promoted_piece_type(type_of(base)))
+                               : transporterBase;
+                      put_transporter_piece(pc, pc == transporterBase ? NO_PIECE : transporterBase);
+                  }
+                  else
+                      add_to_hand(base);
+              }
+
+              promotedTransporter = false;
+          }
+
+          if (ss.peek() == '[')
+          {
+              ss >> token;
+              readingTransporter = true;
+          }
+          else
+          {
+              ss >> token;
+              break;
+          }
       }
+  }
 
   // 2. Active color
   ss >> token;
-  sideToMove = (token != (sfen ? 'w' : 'b') ? WHITE : BLACK);  // Invert colors for SFEN
+  sideToMove = sfen ? (token == 'b' ? WHITE : BLACK)
+                    : (token == 'w' ? WHITE : BLACK);
   ss >> token;
 
   // 3-4. Skip parsing castling and en passant flags if not present
@@ -507,8 +623,123 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
               handCount = 1;
           }
       }
+      // ss is now positioned at the halfmove clock, which is ignored for SFEN
+      ss >> std::skipws;
+      // what is skipws? It is a manipulator that tells the stream to skip whitespace characters when reading input. In this case, it ensures that any whitespace before the game ply number is ignored.
+      bool gamePlyRead = false;
+
+      // cshogi's optional SFEN transporter field is a six-character
+      // parenthesized value.
+      if (has_transporter_squares())
+      {
+          string transporterField;
+          bool hasTransporterField = false;
+          if (ss >> transporterField)
+          {
+              gamePlyRead = !transporterField.empty()
+                  && std::all_of(transporterField.begin(), transporterField.end(),
+                      [](unsigned char c) { return std::isdigit(c); });
+              hasTransporterField = !gamePlyRead;
+              // hasTransporterField is true if transporterField is not empty and not a number
+              if (gamePlyRead)
+                  std::istringstream(transporterField) >> gamePly;
+          }
+
+          std::array<Piece, COLOR_NB> transporterPieces = {NO_PIECE, NO_PIECE};
+          std::array<Piece, COLOR_NB> basePieces = {NO_PIECE, NO_PIECE};
+          const string originalField = transporterField;
+          bool valid = !hasTransporterField
+                    || (transporterField.size() == 6 && transporterField.front() == '('
+                        && transporterField.back() == ')');
+          if (valid && hasTransporterField)
+              transporterField = transporterField.substr(1, 4);
+          valid &= !hasTransporterField || transporterField.size() == 4;
+          bool changedCase = false;
+
+          if (valid && hasTransporterField)
+          {
+              for (Color c : {BLACK, WHITE})
+              {
+                  size_t offset = c == BLACK ? 0 : 2;
+                  char piece = transporterField[offset];
+                  char promotion = transporterField[offset + 1];
+                  if ((promotion != '+' && promotion != '-') || (piece == '-' && promotion == '+'))
+                  {
+                      valid = false;
+                      break;
+                  }
+                  if (piece == '-')
+                      continue;
+
+                  if ((idx = piece_to_char().find(sfen_piece_char(piece))) == string::npos
+                      || idx >= PIECE_NB || type_of(Piece(idx)) == NO_PIECE_TYPE
+                      || type_of(Piece(idx)) == KING)
+                  {
+                      valid = false;
+                      break;
+                  }
+
+                  PieceType pt = type_of(Piece(idx));
+                  Color owner = transporter_owner(c);
+                  Piece base = make_piece(owner, pt);
+                  PieceType promotedType = promoted_piece_type(pt);
+                  if (!(piece_types() & pt)
+                      || (promotion == '+' && (!promotedType || !(piece_types() & promotedType))))
+                  {
+                      valid = false;
+                      break;
+                  }
+
+                  char expectedCase = piece_to_char()[base];
+                  if (var->variantTemplate != "shogi")
+                      expectedCase = sfen_piece_char(expectedCase);
+                  changedCase |= expectedCase != piece;
+
+                  basePieces[owner] = base;
+                  transporterPieces[owner] = promotion == '+'
+                                           ? make_piece(owner, promotedType) : base;
+              }
+          }
+
+          if (hasTransporterField && !valid)
+              sync_cout << "info string Warning: could not parse transporter field '"
+                        << originalField << "'; transporter squares left empty" << sync_endl;
+          else if (valid)
+          {
+              if (changedCase)
+                  sync_cout << "info string Warning: converted transporter piece case in field '"
+                            << originalField << "'" << sync_endl;
+              if (hasTransporterField)
+              {
+                  for (Color c : {WHITE, BLACK})
+                  {
+                      Color owner = transporter_owner(c);
+                      if (transporterPieces[owner])
+                      {
+                          put_transporter_piece(transporterPieces[owner],
+                              transporterPieces[owner] == basePieces[owner] ? NO_PIECE : basePieces[owner]);
+                          char piece = piece_to_char()[basePieces[owner]];
+                          if (var->variantTemplate != "shogi")
+                              piece = sfen_piece_char(piece);
+                          sync_cout << "info string "
+                                    << (c == BLACK ? "Black" : "White")
+                                    << " transporter square " << (c == BLACK ? "y8" : "z0")
+                                    << ": " << piece
+                                    << (transporterPieces[owner] == basePieces[owner] ? '-' : '+')
+                                    << sync_endl;
+                      }
+                      else
+                          sync_cout << "info string "
+                                    << (c == BLACK ? "Black" : "White")
+                                    << " transporter square " << (c == BLACK ? "y8" : "z0")
+                                    << ": -" << sync_endl;
+                  }
+              }
+          }
+      }
       // Move count is in ply for SFEN
-      ss >> std::skipws >> gamePly;
+      if (!gamePlyRead)
+          ss >> std::skipws >> gamePly;
       gamePly = std::max(gamePly - 1, 0);
   }
   else
@@ -664,6 +895,10 @@ void Position::set_state(StateInfo* si) const {
               si->key ^= Zobrist::inHand[pc][pieceCountInHand[c][pt]];
       }
 
+  for (Color c : {WHITE, BLACK})
+      if (transporterPiece[c])
+          si->key ^= Zobrist::transporter[transporterPiece[c]][transporterUnpromotedPiece[c]];
+
   if (check_counting())
       for (Color c : {WHITE, BLACK})
           si->key ^= Zobrist::checks[c][si->checksRemaining[c]];
@@ -715,11 +950,15 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
                   // Wall square
                   ss << "*";
               else if (unpromoted_piece_on(make_square(f, r)))
+              {
                   // Promoted shogi pieces, e.g., +r for dragon
-                  ss << "+" << piece_to_char()[unpromoted_piece_on(make_square(f, r))];
+                  char piece = piece_to_char()[unpromoted_piece_on(make_square(f, r))];
+                  ss << "+" << piece;
+              }
               else
               {
-                  ss << piece_to_char()[piece_on(make_square(f, r))];
+                  char piece = piece_to_char()[piece_on(make_square(f, r))];
+                  ss << piece;
 
                   // Set promoted pieces
                   if (((captures_to_hand() && !drop_loop()) || two_boards() ||  showPromoted) && is_promoted(make_square(f, r)))
@@ -736,7 +975,7 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
   if (sfen)
   {
       ss << (sideToMove == WHITE ? " b " : " w ");
-      for (Color c : {WHITE, BLACK})
+      for (Color c : {BLACK, WHITE})
           for (PieceType pt = KING; pt >= PAWN; --pt)
               if (pieceCountInHand[c][pt] > 0)
               {
@@ -744,26 +983,79 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
                       ss << pieceCountInHand[c][pt];
                   ss << piece_to_char()[make_piece(c, pt)];
               }
-      if (count_in_hand(ALL_PIECES) == 0)
+      if (pieceCountInHand[WHITE][ALL_PIECES] + pieceCountInHand[BLACK][ALL_PIECES] == 0)
+          ss << '-';
+      ss << ' ';
+      if (has_transporter_squares())
+      {
+          ss << '(';
+          for (Color c : {BLACK, WHITE})
+          {
+              Color owner = transporter_owner(c);
+              Piece pc = transporterPiece[owner];
+              if (!pc)
+                  ss << "--";
+              else
+              {
+                  Piece base = transporterUnpromotedPiece[owner] ? transporterUnpromotedPiece[owner] : pc;
+                  char piece = piece_to_char()[make_piece(owner, type_of(base))];
+                  if (var->variantTemplate != "shogi")
+                      piece = sfen_piece_char(piece);
+                  ss << piece << (transporterUnpromotedPiece[owner] ? '+' : '-');
+              }
+          }
+          ss << ')';
+      }
+      else
           ss << '-';
       ss << " " << gamePly + 1;
       return ss.str();
   }
 
-  // pieces in hand
-  if (!free_drops() && (piece_drops() || seirawan_gating()))
+  // pieces in hand and transporter squares
+  bool showHand = !free_drops() && (piece_drops() || seirawan_gating());
+  if (showHand || has_transporter_squares())
   {
       ss << '[';
-      if (holdings != "-")
-          ss << holdings;
-      else
-          for (Color c : {WHITE, BLACK})
-              for (PieceType pt = KING; pt >= PAWN; --pt)
-              {
-                  assert(pieceCountInHand[c][pt] >= 0);
-                  ss << std::string(pieceCountInHand[c][pt], piece_to_char()[make_piece(c, pt)]);
-              }
+      if (showHand)
+      {
+          if (holdings != "-")
+              ss << holdings;
+          else
+          {
+              bool emptyHand = true;
+              for (Color c : {WHITE, BLACK})
+                  for (PieceType pt = KING; pt >= PAWN; --pt)
+                  {
+                      assert(pieceCountInHand[c][pt] >= 0);
+                      ss << std::string(pieceCountInHand[c][pt], piece_to_char()[make_piece(c, pt)]);
+                      emptyHand &= pieceCountInHand[c][pt] == 0;
+                  }
+              if (emptyHand && has_transporter_squares())
+                  ss << '-';
+          }
+      }
+      else if (has_transporter_squares())
+          ss << '-';
       ss << ']';
+
+      if (has_transporter_squares())
+      {
+          ss << '[';
+          bool emptyTransporters = true;
+          for (Color c : {WHITE, BLACK})
+              if (transporterPiece[c])
+              {
+                  emptyTransporters = false;
+                  if (transporterUnpromotedPiece[c])
+                      ss << '+' << piece_to_char()[transporterUnpromotedPiece[c]];
+                  else
+                      ss << piece_to_char()[transporterPiece[c]];
+              }
+          if (emptyTransporters)
+              ss << '-';
+          ss << ']';
+      }
   }
 
   ss << (sideToMove == WHITE ? " w " : " b ");
@@ -863,19 +1155,9 @@ Bitboard Position::slider_blockers(Bitboard sliders, Square s, Bitboard& pinners
                  | (attacks_bb<BISHOP>(s) & pieces(c, QUEEN, BISHOP, ARCHBISHOP))) & sliders;
       slidingSnipers = snipers;
   }
-  else if (var->fastAttacks2)
-  {
-      snipers = (  (attacks_bb<  ROOK>(s) & (  pieces(c, ROOK, QUEEN, DRAGON)
-                                             | (pieces(c, LANCE) & PseudoAttacks[~c][LANCE][s])))
-                 | (attacks_bb<BISHOP>(s) & pieces(c, BISHOP, QUEEN, DRAGON_HORSE))) & sliders;
-      // Like the generic path, skip sliders that already attack 's' directly
-      snipers &= ~(attacks_bb<ROOK>(s, pieces()) | attacks_bb<BISHOP>(s, pieces()));
-      slidingSnipers = snipers;
-  }
   else
   {
-      // Only piece types with blockable attacks can be snipers
-      for (PieceSet ps = piece_types() & SniperTypes; ps;)
+      for (PieceSet ps = piece_types(); ps;)
       {
           PieceType pt = pop_lsb(ps);
           Bitboard b = sliders & (PseudoAttacks[~c][pt][s] ^ LeaperAttacks[~c][pt][s]) & pieces(c, pt);
@@ -1063,9 +1345,53 @@ bool Position::legal(Move m) const {
   Color us = sideToMove;
   Square from = from_sq(m);
   Square to = to_sq(m);
+  Square transporter = transporter_square(transporter_owner(us));
+
+  if (has_transporter_squares()
+      && (from == transporter_square(transporter_owner(~us)) || to == transporter_square(transporter_owner(~us))))
+      return false;
 
   assert(color_of(moved_piece(m)) == us);
   assert(!count<KING>(us) || piece_on(square<KING>(us)) == make_piece(us, KING));
+
+  if (is_transporter_move(m))
+  {
+      if (type_of(m) != SPECIAL || is_pass(m))
+          return false;
+      if (from == transporter ? !(board_bb() & to)
+          : to == transporter ? !(board_bb() & from) : true)
+          return false;
+      if ((!checking_permitted() || (from == transporter && !drop_checks()))
+          && gives_check(m))
+          return false;
+
+      if (from == transporter)
+      {
+          Piece pc = transporter_piece(us);
+          if (!pc || type_of(pc) == KING || !(board_bb() & to) || !empty(to)
+              || !(drop_region(us, type_of(pc)) & to))
+              return false;
+          return !count<KING>(us) || !attackers_to(square<KING>(us), pieces() | to, ~us);
+      }
+
+      if (to != transporter || transporter_piece(us) || checkers()
+          || !(board_bb() & from) || type_of(moved_piece(m)) == KING)
+          return false;
+
+      bool hasLegalBoardMove = false;
+      for (const auto& candidate : MoveList<NON_EVASIONS>(*this))
+          if (from_sq(candidate) == from && !is_pass(candidate)
+              && (board_bb() & to_sq(candidate)) && legal(candidate))
+          {
+              hasLegalBoardMove = true;
+              break;
+          }
+      if (!hasLegalBoardMove)
+          return false;
+
+      return !count<KING>(us) || !attackers_to(square<KING>(us), pieces() ^ from, ~us);
+  }
+
   assert(board_bb() & to);
 
   // Illegal checks
@@ -1296,14 +1622,6 @@ bool Position::legal(Move m) const {
   if (!count<KING>(us))
       return true;
 
-  // When not in check and all pins are known, only a pinned piece can expose the king.
-  // Pinned pieces still need the full test, since leapers can jump over the pinner.
-  if (   var->fastLegal
-      && !checkers()
-      && !(piece_types() & PinUnsafeTypes)
-      && (type_of(m) == DROP || !(blockers_for_king(us) & from)))
-      return true;
-
   Bitboard janggiCannons = pieces(JANGGI_CANNON);
   if (type_of(moved_piece(m)) == JANGGI_CANNON)
       janggiCannons = (type_of(m) == DROP ? janggiCannons : janggiCannons ^ from) | to;
@@ -1324,7 +1642,20 @@ bool Position::pseudo_legal(const Move m) const {
   Color us = sideToMove;
   Square from = from_sq(m);
   Square to = to_sq(m);
+  Square transporter = transporter_square(transporter_owner(us));
   Piece pc = moved_piece(m);
+
+  if (is_transporter_move(m))
+  {
+      if (type_of(m) != SPECIAL || is_pass(m))
+          return false;
+      if (from == transporter)
+          return transporter_piece(us) && type_of(pc) != KING && (board_bb() & to)
+              && empty(to) && (drop_region(us, type_of(pc)) & to);
+      return to == transporter && !transporter_piece(us) && !checkers()
+          && (board_bb() & from) && pc && color_of(pc) == us && type_of(pc) != KING
+          && (moves_from(us, type_of(pc), from) & board_bb() & ~pieces(us));
+  }
 
   // Illegal moves to squares outside of board or to wall squares
   if (!(board_bb() & to))
@@ -1452,6 +1783,17 @@ bool Position::gives_check(Move m) const {
 
   Square from = from_sq(m);
   Square to = to_sq(m);
+
+  if (is_transporter_move(m))
+  {
+      if (!count<KING>(~sideToMove))
+          return false;
+      Square ksq = square<KING>(~sideToMove);
+      if (from == transporter_square(transporter_owner(sideToMove)))
+          return (attacks_bb(sideToMove, type_of(moved_piece(m)), to, pieces() | to) & square_bb(ksq))
+              || (attackers_to(ksq, pieces() | to, sideToMove) & pieces(sideToMove));
+      return attackers_to(ksq, pieces() ^ from, sideToMove) & pieces(sideToMove) & ~square_bb(from);
+  }
 
   // No check possible without king
   if (!count<KING>(~sideToMove))
@@ -1612,6 +1954,62 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
   assert(captured == NO_PIECE || color_of(captured) == (type_of(m) != CASTLING ? them : us));
   assert(type_of(captured) != KING);
 
+  if (is_transporter_move(m))
+  {
+      if (from == transporter_square(transporter_owner(us)))
+      {
+          Piece base = transporter_unpromoted_piece(us);
+          int handCount = count_with_transporter(us, type_of(pc));
+          transporterPiece[us] = NO_PIECE;
+          transporterUnpromotedPiece[us] = NO_PIECE;
+          psq -= PSQT::psq[pc][SQ_NONE];
+          put_piece(pc, to, base != NO_PIECE, base);
+
+          dp.piece[0] = pc;
+          dp.from[0] = SQ_NONE;
+          dp.to[0] = to;
+          dp.handPiece[0] = pc;
+          dp.handCount[0] = handCount;
+      }
+      else
+      {
+          Piece base = is_promoted(from) ? unpromoted_piece_on(from) : NO_PIECE;
+          remove_piece(from);
+          transporterPiece[us] = pc;
+          transporterUnpromotedPiece[us] = base;
+          psq += PSQT::psq[pc][SQ_NONE];
+
+          dp.piece[0] = pc;
+          dp.from[0] = from;
+          dp.to[0] = SQ_NONE;
+          dp.handPiece[0] = pc;
+          dp.handCount[0] = count_with_transporter(us, type_of(pc));
+      }
+
+      st->capturedPiece = NO_PIECE;
+      sideToMove = them;
+      set_state(st);
+      st->move = m;
+      st->capturedPiece = NO_PIECE;
+      st->repetition = 0;
+      int end = captures_to_hand() ? st->pliesFromNull : std::min(st->rule50, st->pliesFromNull);
+      if (end >= 4)
+      {
+          StateInfo* stp = st->previous->previous;
+          for (int i = 4; i <= end; i += 2)
+          {
+              stp = stp->previous->previous;
+              if (stp->key == st->key)
+              {
+                  st->repetition = stp->repetition ? -i : i;
+                  break;
+              }
+          }
+      }
+      assert(pos_is_ok());
+      return;
+  }
+
   if (check_counting() && givesCheck)
       k ^= Zobrist::checks[us][st->checksRemaining[us]] ^ Zobrist::checks[us][--(st->checksRemaining[us])];
 
@@ -1675,7 +2073,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
           if (Eval::useNNUE)
           {
               dp.handPiece[1] = pieceToHand;
-              dp.handCount[1] = pieceCountInHand[color_of(pieceToHand)][type_of(pieceToHand)];
+              dp.handCount[1] = count_with_transporter(color_of(pieceToHand), type_of(pieceToHand));
           }
       }
       else if (Eval::useNNUE)
@@ -1785,7 +2183,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
           // Add drop piece
           dp.piece[0] = pc;
           dp.handPiece[0] = make_piece(us, in_hand_piece_type(m));
-          dp.handCount[0] = pieceCountInHand[us][in_hand_piece_type(m)];
+          dp.handCount[0] = count_with_transporter(us, in_hand_piece_type(m));
           dp.from[0] = SQ_NONE;
           dp.to[0] = to;
       }
@@ -1973,7 +2371,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
           // Add gating piece
           dp.piece[dp.dirty_num] = gating_piece;
           dp.handPiece[dp.dirty_num] = gating_piece;
-          dp.handCount[dp.dirty_num] = pieceCountInHand[us][gating_type(m)];
+          dp.handCount[dp.dirty_num] = count_with_transporter(us, gating_type(m));
           dp.from[dp.dirty_num] = SQ_NONE;
           dp.to[dp.dirty_num] = gate;
           dp.dirty_num++;
@@ -2060,7 +2458,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
               if (Eval::useNNUE)
               {
                   dp.handPiece[dp.dirty_num - 1] = pieceToHand;
-                  dp.handCount[dp.dirty_num - 1] = pieceCountInHand[color_of(pieceToHand)][type_of(pieceToHand)];
+                  dp.handCount[dp.dirty_num - 1] = count_with_transporter(color_of(pieceToHand), type_of(pieceToHand));
               }
           }
 
@@ -2168,6 +2566,32 @@ void Position::undo_move(Move m) {
   Square from = from_sq(m);
   Square to = to_sq(m);
   Piece pc = piece_on(to);
+
+  if (is_transporter_move(m))
+  {
+      if (to == transporter_square(transporter_owner(us)))
+      {
+          Piece transported = transporter_piece(us);
+          Piece base = transporter_unpromoted_piece(us);
+          transporterPiece[us] = NO_PIECE;
+          transporterUnpromotedPiece[us] = NO_PIECE;
+          psq -= PSQT::psq[transported][SQ_NONE];
+          put_piece(transported, from, base != NO_PIECE, base);
+      }
+      else
+      {
+          Piece base = unpromoted_piece_on(to);
+          remove_piece(to);
+          transporterPiece[us] = pc;
+          transporterUnpromotedPiece[us] = base;
+          psq += PSQT::psq[pc][SQ_NONE];
+      }
+
+      st = st->previous;
+      --gamePly;
+      assert(pos_is_ok());
+      return;
+  }
 
   assert(type_of(m) == DROP || empty(from) || type_of(m) == CASTLING || is_gating(m)
          || (type_of(m) == PROMOTION && sittuyin_promotion())
@@ -2385,6 +2809,15 @@ Key Position::key_after(Move m) const {
   Piece pc = moved_piece(m);
   Piece captured = piece_on(to);
   Key k = st->key ^ Zobrist::side;
+
+  if (is_transporter_move(m))
+  {
+      if (from == transporter_square(transporter_owner(sideToMove)))
+          return k ^ Zobrist::transporter[pc][transporter_unpromoted_piece(sideToMove)]
+               ^ Zobrist::psq[pc][to];
+      Piece base = is_promoted(from) ? unpromoted_piece_on(from) : NO_PIECE;
+      return k ^ Zobrist::psq[pc][from] ^ Zobrist::transporter[pc][base];
+  }
 
   if (captured)
   {
@@ -2667,9 +3100,7 @@ bool Position::is_optional_game_end(Value& result, int ply, int countStarted) co
   }
 
   // n-fold repetition
-  // Without a previous occurrence of the current position (see st->repetition)
-  // only the Janggi move repetition rule can end the game.
-  if (n_fold_rule() && (st->repetition || var->moveRepetitionIllegal))
+  if (n_fold_rule())
   {
       int end = captures_to_hand() ? st->pliesFromNull : std::min(st->rule50, st->pliesFromNull);
 

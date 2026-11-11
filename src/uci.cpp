@@ -74,7 +74,7 @@ namespace {
     while (is >> token && (m = UCI::to_move(pos, token)) != MOVE_NONE)
     {
         states->emplace_back();
-        pos.do_move(m, states->back());
+        pos.do_move(m, states->back(), pos.gives_check(m));
     }
   }
 
@@ -127,7 +127,8 @@ namespace {
   // the thinking time and other parameters from the input string, then starts
   // the search.
 
-  void go(Position& pos, istringstream& is, StateListPtr& states, const std::vector<Move>& banmoves = {}) {
+  void go(Position& pos, istringstream& is, StateListPtr& states, const std::vector<Move>& banmoves = {},
+          Search::LimitsType* previousLimits = nullptr) {
 
     Search::LimitsType limits;
     string token;
@@ -170,6 +171,9 @@ namespace {
             limits.time[WHITE] += byoyomi;
             limits.time[BLACK] += byoyomi;
         }
+
+    if (previousLimits)
+        *previousLimits = limits;
 
     Threads.start_thinking(pos, states, limits, ponderMode);
   }
@@ -284,6 +288,14 @@ namespace {
     }
   }
 
+  char usi_piece_char(const Position& pos, Color c, PieceType pt) {
+    char piece = pos.piece_to_char()[make_piece(c, pt)];
+    if (pos.has_transporter_squares())
+        return char(toupper(static_cast<unsigned char>(piece)));
+    return c == BLACK ? char(toupper(static_cast<unsigned char>(piece)))
+                      : char(tolower(static_cast<unsigned char>(piece)));
+  }
+
 } // namespace
 
 
@@ -309,6 +321,8 @@ void UCI::loop(int argc, char* argv[]) {
   XBoard::stateMachine = new XBoard::StateMachine(pos, states);
   // UCCI banmoves state
   std::vector<Move> banmoves = {};
+  Search::LimitsType previousLimits;
+  bool hasPreviousSearch = false;
 
   if (argc > 1 && (std::strcmp(argv[1], "noautoload") == 0))
   {
@@ -355,7 +369,7 @@ void UCI::loop(int argc, char* argv[]) {
                                            CurrentProtocol == USI  ? "shogi"
                                          : CurrentProtocol == UCCI || CurrentProtocol == UCI_CYCLONE ? "xiangqi"
 #else
-                                           CurrentProtocol == USI  ? "minishogi"
+                                           CurrentProtocol == USI  ? "chess"
                                          : CurrentProtocol == UCCI || CurrentProtocol == UCI_CYCLONE ? "minixiangqi"
 #endif
                                                            : "chess");
@@ -373,21 +387,82 @@ void UCI::loop(int argc, char* argv[]) {
       else if (CurrentProtocol == XBOARD)
           XBoard::stateMachine->process_command(token, is);
 
-      else if (token == "setoption")  setoption(is);
+      else if (token == "setoption")  setoption(is), hasPreviousSearch = false;
       // UCCI-specific banmoves command
       else if (token == "banmoves")
           while (is >> token)
               banmoves.push_back(UCI::to_move(pos, token));
-      else if (token == "go")         go(pos, is, states, banmoves);
-      else if (token == "position")   position(pos, is, states), banmoves.clear();
-      else if (token == "ucinewgame" || token == "usinewgame" || token == "uccinewgame") Search::clear();
+      else if (token == "go")         go(pos, is, states, banmoves, &previousLimits), hasPreviousSearch = true;
+      else if (token == "position")   position(pos, is, states), banmoves.clear(), hasPreviousSearch = false;
+      else if (token == "m")
+      {
+          if (!(is >> token))
+              sync_cout << "info string missing move" << sync_endl;
+          else
+          {
+              // the move variable is used to check if 
+              //the move is legal, but we don't actually use it 
+              //to make the move
+              // we use pos.do_move() instead, so that we 
+              // can pass in the state info
+              Move move = UCI::to_move(pos, token);
+              if (move == MOVE_NONE)
+                  sync_cout << "info string illegal move: " << token << sync_endl;
+              else
+              {
+                  states->emplace_back();
+                  pos.do_move(move, states->back(), pos.gives_check(move));
+                  banmoves.clear();
+                  hasPreviousSearch = false;
+              }
+          }
+      }
+      else if (token == "ucinewgame" || token == "usinewgame" || token == "uccinewgame")
+      {
+          Search::clear();
+          hasPreviousSearch = false;
+      }
+      else if (token == "g")
+      {
+          if (!hasPreviousSearch)
+              sync_cout << "info string no previous best move to play" << sync_endl;
+          else
+          {
+              Threads.main()->wait_for_search_finished();
+              Move bestMove = Threads.main()->lastBestMove;
+              if (bestMove == MOVE_NONE || !pos.legal(bestMove))
+              {
+                  sync_cout << "info string no best move available to play" << sync_endl;
+                  hasPreviousSearch = false;
+              }
+              else
+              {
+                  states = std::move(Threads.setupStates);
+                  if (!states)
+                  {
+                      sync_cout << "info string cannot continue without position history" << sync_endl;
+                      hasPreviousSearch = false;
+                  }
+                  else
+                  {
+                      states->emplace_back();
+                      pos.do_move(bestMove, states->back(), pos.gives_check(bestMove));
+                      previousLimits.searchmoves.clear();
+                      previousLimits.banmoves.clear();
+                      previousLimits.startTime = now();
+                      Threads.start_thinking(pos, states, previousLimits);
+                  }
+              }
+          }
+      }
       else if (token == "isready")    sync_cout << "readyok" << sync_endl;
 
       // Additional custom non-UCI commands, mainly for debugging.
       // Do not use these commands during a search!
-      else if (token == "flip")     pos.flip();
+      else if (token == "flip")     pos.flip(), hasPreviousSearch = false;
       else if (token == "bench")    bench(pos, is, states);
       else if (token == "d")        sync_cout << pos << sync_endl;
+      else if (token == "2")        print_position(sync_cout, pos, true) << sync_endl;
       else if (token == "eval")     trace_eval(pos);
       else if (token == "compiler") sync_cout << compiler_info() << sync_endl;
       else if (token == "export_net")
@@ -472,6 +547,13 @@ string UCI::wdl(Value v, int ply) {
 /// UCI::square() converts a Square to a string in algebraic notation (g1, a7, etc.)
 
 std::string UCI::square(const Position& pos, Square s) {
+  if (pos.has_transporter_squares())
+  {
+      if (s == black_transporter_square())
+          return "y8";
+      if (s == white_transporter_square())
+          return "z0";
+  }
 #ifdef LARGEBOARDS
   if (CurrentProtocol == USI)
       return rank_of(s) < RANK_10 ? std::string{ char('1' + pos.max_file() - file_of(s)), char('a' + pos.max_rank() - rank_of(s)) }
@@ -494,11 +576,16 @@ std::string UCI::square(const Position& pos, Square s) {
 
 string UCI::dropped_piece(const Position& pos, Move m) {
   assert(type_of(m) == DROP);
+  Color c = pos.side_to_move();
   if (dropped_piece_type(m) == pos.promoted_piece_type(in_hand_piece_type(m)))
       // Dropping as promoted piece
-      return std::string{'+', pos.piece_to_char()[in_hand_piece_type(m)]};
+      return std::string{'+', CurrentProtocol == USI
+                             ? usi_piece_char(pos, c, in_hand_piece_type(m))
+                             : pos.piece_to_char()[in_hand_piece_type(m)]};
   else
-      return std::string{pos.piece_to_char()[dropped_piece_type(m)]};
+      return std::string{CurrentProtocol == USI
+                         ? usi_piece_char(pos, c, dropped_piece_type(m))
+                         : pos.piece_to_char()[dropped_piece_type(m)]};
 }
 
 
@@ -531,22 +618,41 @@ string UCI::move(const Position& pos, Move m) {
           to = to_sq(m);
   }
 
-  string move = (type_of(m) == DROP ? UCI::dropped_piece(pos, m) + (CurrentProtocol == USI ? '*' : '@')
-                                    : UCI::square(pos, from)) + UCI::square(pos, to);
+  string move;
+  if (type_of(m) == DROP)
+      move = UCI::dropped_piece(pos, m) + (CurrentProtocol == USI ? '*' : '@') + UCI::square(pos, to);
+  else if (pos.is_transporter_move(m)
+           && from == pos.transporter_square(pos.transporter_owner(pos.side_to_move())))
+  {
+      Piece base = pos.transporter_unpromoted_piece(pos.side_to_move());
+      PieceType pt = base ? type_of(base) : type_of(pos.moved_piece(m));
+      move = base ? "+" : "";
+      move += CurrentProtocol == USI
+            ? usi_piece_char(pos, pos.side_to_move(), pt)
+            : pos.piece_to_char()[pt];
+      move += ":" + UCI::square(pos, to);
+  }
+  else
+      move = UCI::square(pos, from)
+           + UCI::square(pos, to);
 
   // Wall square
   if (pos.walling() && CurrentProtocol == XBOARD)
       move += "," + UCI::square(pos, to) + UCI::square(pos, gating_square(m));
 
   if (type_of(m) == PROMOTION)
-      move += pos.piece_to_char()[make_piece(BLACK, promotion_type(m))];
+      move += CurrentProtocol == USI
+            ? usi_piece_char(pos, pos.side_to_move(), promotion_type(m))
+            : pos.piece_to_char()[make_piece(BLACK, promotion_type(m))];
   else if (type_of(m) == PIECE_PROMOTION)
       move += '+';
   else if (type_of(m) == PIECE_DEMOTION)
       move += '-';
   else if (is_gating(m))
   {
-      move += pos.piece_to_char()[make_piece(BLACK, gating_type(m))];
+      move += CurrentProtocol == USI
+            ? usi_piece_char(pos, pos.side_to_move(), gating_type(m))
+            : pos.piece_to_char()[make_piece(BLACK, gating_type(m))];
       if (gating_square(m) != from)
           move += UCI::square(pos, gating_square(m));
   }
@@ -569,7 +675,7 @@ Move UCI::to_move(const Position& pos, string& str) {
       if (str[4] == '=')
           // shogi moves refraining from promotion might use equals sign
           str.pop_back();
-      else
+      else if (CurrentProtocol != USI)
           // Junior could send promotion piece in uppercase
           str[4] = char(tolower(str[4]));
   }

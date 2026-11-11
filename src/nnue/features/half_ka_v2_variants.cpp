@@ -66,7 +66,7 @@ namespace Stockfish::Eval::NNUE::Features {
           for (PieceSet ps = pos.piece_types(); ps;)
           {
               PieceType pt = pop_lsb(ps);
-              for (int i = 0; i < pos.count_in_hand(c, pt); i++)
+              for (int i = 0; i < pos.count_with_transporter(c, pt); i++)
                   active.push_back(make_index(perspective, i, make_piece(c, pt), oriented_ksq, pos));
           }
 

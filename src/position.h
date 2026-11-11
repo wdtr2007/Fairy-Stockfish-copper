@@ -230,7 +230,17 @@ public:
   // Variant-specific properties
   int count_in_hand(PieceType pt) const;
   int count_in_hand(Color c, PieceType pt) const;
+  int count_with_transporter(PieceType pt) const;
+  int count_with_transporter(Color c, PieceType pt) const;
   int count_with_hand(Color c, PieceType pt) const;
+  int count_in_transporter(Color c, PieceType pt = ALL_PIECES) const;
+  bool has_transporter_squares() const;
+  Color transporter_owner(Color c) const;
+  Square transporter_square(Color c) const;
+  Piece transporter_piece(Color c) const;
+  Piece transporter_unpromoted_piece(Color c) const;
+  void put_transporter_piece(Piece pc, Piece unpromotedPc = NO_PIECE);
+  bool is_transporter_move(Move m) const;
   bool bikjang() const;
   bool allow_virtual_drop(Color c, PieceType pt) const;
 
@@ -381,6 +391,8 @@ private:
   bool tsumeMode;
   bool chess960;
   int pieceCountInHand[COLOR_NB][PIECE_TYPE_NB];
+  Piece transporterPiece[COLOR_NB];
+  Piece transporterUnpromotedPiece[COLOR_NB];
   int virtualPieces;
   Bitboard promotedPieces;
   void add_to_hand(Piece pc);
@@ -391,6 +403,7 @@ private:
 };
 
 extern std::ostream& operator<<(std::ostream& os, const Position& pos);
+std::ostream& print_position(std::ostream& os, const Position& pos, bool usiCoordinates);
 
 inline const Variant* Position::variant() const {
   assert(var != nullptr);
@@ -520,7 +533,7 @@ inline PieceSet Position::mutually_immune_types() const {
 
 inline EndgameEval Position::endgame_eval() const {
   assert(var != nullptr);
-  return !count_in_hand(ALL_PIECES) && (var->endgameEval != EG_EVAL_CHESS || count<KING>() == 2) ? var->endgameEval : NO_EG_EVAL;
+  return !count_with_transporter(ALL_PIECES) && (var->endgameEval != EG_EVAL_CHESS || count<KING>() == 2) ? var->endgameEval : NO_EG_EVAL;
 }
 
 inline Bitboard Position::double_step_region(Color c) const {
@@ -594,7 +607,7 @@ inline bool Position::nnue_use_pockets() const {
 
 inline bool Position::nnue_applicable() const {
   // Do not use NNUE during setup phases (placement, sittuyin)
-  return (!count_in_hand(ALL_PIECES) || nnue_use_pockets() || !must_drop())
+  return (!count_with_transporter(ALL_PIECES) || nnue_use_pockets() || !must_drop())
          && !virtualPieces
          && (!nnue_king() || (count(WHITE, nnue_king()) == 1 && count(BLACK, nnue_king()) == 1));
 }
@@ -1178,6 +1191,12 @@ inline Piece Position::unpromoted_piece_on(Square s) const {
 inline Piece Position::moved_piece(Move m) const {
   if (type_of(m) == DROP)
       return make_piece(sideToMove, dropped_piece_type(m));
+  if (has_transporter_squares()
+      && (from_sq(m) == transporter_square(WHITE) || from_sq(m) == transporter_square(BLACK)))
+  {
+      Color owner = from_sq(m) == transporter_square(BLACK) ? BLACK : WHITE;
+      return transporterPiece[transporter_owner(owner)];
+  }
   return piece_on(from_sq(m));
 }
 
@@ -1560,8 +1579,58 @@ inline int Position::count_in_hand(Color c, PieceType pt) const {
   return pieceCountInHand[c][pt];
 }
 
+inline int Position::count_with_transporter(PieceType pt) const {
+  return count_with_transporter(WHITE, pt) + count_with_transporter(BLACK, pt);
+}
+
+inline int Position::count_with_transporter(Color c, PieceType pt) const {
+  return count_in_hand(c, pt) + count_in_transporter(c, pt);
+}
+
 inline int Position::count_with_hand(Color c, PieceType pt) const {
-  return pieceCount[make_piece(c, pt)] + pieceCountInHand[c][pt];
+  return pieceCount[make_piece(c, pt)] + count_with_transporter(c, pt);
+}
+
+inline int Position::count_in_transporter(Color c, PieceType pt) const {
+  if (!has_transporter_squares() || !transporterPiece[c])
+      return 0;
+  return pt == ALL_PIECES || type_of(transporterPiece[c]) == pt;
+}
+
+inline bool Position::has_transporter_squares() const {
+  return var->transporterSquares;
+}
+
+inline Color Position::transporter_owner(Color c) const {
+  // Shogi SFEN colors are reversed relative to the engine's internal colors.
+  return var->variantTemplate == "shogi" ? ~c : c;
+}
+
+inline Square Position::transporter_square(Color c) const {
+  return c == BLACK ? black_transporter_square() : white_transporter_square();
+}
+
+inline Piece Position::transporter_piece(Color c) const {
+  return transporterPiece[c];
+}
+
+inline Piece Position::transporter_unpromoted_piece(Color c) const {
+  return transporterUnpromotedPiece[c];
+}
+
+inline void Position::put_transporter_piece(Piece pc, Piece unpromotedPc) {
+  assert(has_transporter_squares());
+  assert(pc != NO_PIECE);
+  assert(!transporterPiece[color_of(pc)]);
+  transporterPiece[color_of(pc)] = pc;
+  transporterUnpromotedPiece[color_of(pc)] = unpromotedPc;
+  psq += PSQT::psq[pc][SQ_NONE];
+}
+
+inline bool Position::is_transporter_move(Move m) const {
+  return has_transporter_squares()
+      && (from_sq(m) == transporter_square(WHITE) || from_sq(m) == transporter_square(BLACK)
+       || to_sq(m) == transporter_square(WHITE) || to_sq(m) == transporter_square(BLACK));
 }
 
 inline bool Position::bikjang() const {
@@ -1642,7 +1711,7 @@ inline void Position::undrop_piece(Piece pc_hand, Square s) {
 }
 
 inline bool Position::can_drop(Color c, PieceType pt) const {
-  return variant()->freeDrops || count_in_hand(c, pt) > 0;
+  return variant()->freeDrops || pieceCountInHand[c][pt] > 0;
 }
 
 } // namespace Stockfish

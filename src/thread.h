@@ -95,6 +95,7 @@ struct MainThread : public Thread {
   bool stopOnPonderhit;
   std::atomic_bool ponder;
   Thread* bestThread; // to fetch best move when in XBoard mode
+  Move lastBestMove = MOVE_NONE;
 };
 
 

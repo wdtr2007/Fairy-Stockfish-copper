@@ -190,6 +190,13 @@ inline std::string rank(const Position& pos, Square s, Notation n) {
 }
 
 inline std::string square(const Position& pos, Square s, Notation n) {
+    if (pos.has_transporter_squares())
+    {
+        if (s == black_transporter_square())
+            return "y8";
+        if (s == white_transporter_square())
+            return "z0";
+    }
     switch (n)
     {
     case NOTATION_JANGGI:
@@ -287,6 +294,9 @@ inline const std::string move_to_san(Position& pos, Move m, Notation n) {
     Square from = from_sq(m);
     Square to = to_sq(m);
 
+    if (pos.is_transporter_move(m))
+        return square(pos, from, n) + "-" + square(pos, to, n);
+
     if (type_of(m) == CASTLING)
     {
         san = to > from ? "O-O" : "O-O-O";
@@ -367,7 +377,6 @@ inline bool has_insufficient_material(Color c, const Position& pos) {
 
     // Other win rules
     if (   pos.captures_to_hand()
-        || pos.free_drops()
         || pos.count_in_hand(c, ALL_PIECES)
         || (pos.extinction_value() != VALUE_NONE && !pos.extinction_pseudo_royal())
         || (pos.variant()->nFoldRule && pos.variant()->nFoldValue != VALUE_DRAW)
@@ -979,8 +988,76 @@ inline Validation check_digit_field(const std::string& field) {
     return OK;
 }
 
+inline bool valid_transporter_field(const std::string& field, const Variant* v) {
+    if (field == "-")
+        return true;
+    if (field.empty())
+        return false;
+
+    bool seenTransporter[COLOR_NB] = {false, false};
+    bool promoted = false;
+    for (size_t i = 0; i < field.size(); ++i)
+    {
+        char c = field[i];
+        if (c == '+')
+        {
+            if (promoted || i + 1 == field.size())
+                return false;
+            promoted = true;
+            continue;
+        }
+
+        size_t idx = v->pieceToChar.find(c);
+        if (idx == std::string::npos)
+            return false;
+        Piece pc = Piece(idx);
+        Color owner = color_of(pc);
+        if (seenTransporter[owner] || (promoted && !v->promotedPieceType[type_of(pc)]))
+            return false;
+        seenTransporter[owner] = true;
+        promoted = false;
+    }
+    return !promoted;
+}
+
+inline bool valid_sfen_transporter_field(const std::string& field, const Variant* v) {
+    if (field.size() != 6 || field.front() != '(' || field.back() != ')')
+        return false;
+    std::string contents = field.substr(1, 4);
+
+    for (size_t i : {size_t(0), size_t(2)})
+    {
+        char piece = contents[i];
+        char promotion = contents[i + 1];
+        if (promotion != '+' && promotion != '-')
+            return false;
+        if (piece == '-')
+        {
+            if (promotion == '+')
+                return false;
+            continue;
+        }
+
+        const unsigned char pieceCode = static_cast<unsigned char>(piece);
+        piece = std::islower(pieceCode) ? char(std::toupper(pieceCode))
+             : std::isupper(pieceCode) ? char(std::tolower(pieceCode))
+                                       : piece;
+        size_t idx = v->pieceToChar.find(piece);
+        if (idx == std::string::npos || idx >= PIECE_NB)
+            return false;
+        PieceType pt = type_of(Piece(idx));
+        if (pt == NO_PIECE_TYPE || pt == KING || !(v->pieceTypes & pt)
+            || (promotion == '+' && (!v->promotedPieceType[pt]
+                                     || !(v->pieceTypes & v->promotedPieceType[pt]))))
+            return false;
+    }
+    return true;
+}
+
 inline std::string get_valid_special_chars(const Variant* v) {
     std::string validSpecialCharactersFirstField = "/*";
+    if (v->transporterSquares)
+        validSpecialCharactersFirstField += '|';
     // Whether or not '-', '+', '~', '[', ']' are valid depends on the variant being played.
     if (v->shogiStylePromotions)
         validSpecialCharactersFirstField += '+';
@@ -1004,6 +1081,15 @@ inline FenValidation validate_fen(const std::string& fen, const Variant* v, bool
 
     std::vector<std::string> fenParts = get_fen_parts(fen, ' ');
     std::vector<std::string> startFenParts = get_fen_parts(v->startFen, ' ');
+    bool sfenWithTransporterField = fenParts.size() == 5
+                                 && fenParts[0].find('[') == std::string::npos
+                                 && fenParts[1].size() == 1
+                                 && (fenParts[1][0] == 'w' || fenParts[1][0] == 'b')
+                                 && (v->transporterSquares || fenParts[3] == "-");
+    bool sfenWithoutTransporterField = v->transporterSquares && fenParts.size() == 4
+                                    && fenParts[0].find('[') == std::string::npos
+                                    && fenParts[1].size() == 1
+                                    && (fenParts[1][0] == 'w' || fenParts[1][0] == 'b');
 
     // check for number of parts
     const unsigned int maxNumberFenParts = 6 + v->checkCounting;
@@ -1036,9 +1122,25 @@ inline FenValidation validate_fen(const std::string& fen, const Variant* v, bool
     std::string pocket = "";
     if (v->pieceDrops || v->seirawanGating)
     {
-        if (check_pocket_info(fenParts[0], nbRanks, v, pocket) == NOK)
+        std::string pocketFenPart = fenParts[0];
+        if (v->transporterSquares && pocketFenPart.find('|') != std::string::npos)
+        {
+            size_t transporterSeparator = pocketFenPart.find('|');
+            size_t openingBracket = pocketFenPart.find('[');
+            size_t closingBracket = pocketFenPart.find(']', transporterSeparator);
+            if (openingBracket == std::string::npos || openingBracket > transporterSeparator
+                || closingBracket == std::string::npos
+                || pocketFenPart.find('|', transporterSeparator + 1) != std::string::npos
+                || !valid_transporter_field(pocketFenPart.substr(transporterSeparator + 1,
+                                                                  closingBracket - transporterSeparator - 1), v))
+                return FEN_INVALID_POCKET_INFO;
+            pocketFenPart.erase(transporterSeparator, closingBracket - transporterSeparator);
+        }
+        if (check_pocket_info(pocketFenPart, nbRanks, v, pocket) == NOK)
             return FEN_INVALID_POCKET_INFO;
     }
+    else if (v->transporterSquares && fenParts[0].find('|') != std::string::npos)
+        return FEN_INVALID_POCKET_INFO;
 
     // check for number of kings
     if (v->pieceTypes & KING)
@@ -1070,8 +1172,30 @@ inline FenValidation validate_fen(const std::string& fen, const Variant* v, bool
         return FEN_INVALID_SIDE_TO_MOVE;
     }
 
+    if (sfenWithTransporterField || sfenWithoutTransporterField)
+    {
+        auto validHand = [v](const std::string& field) {
+            if (field == "-")
+                return true;
+            for (char c : field)
+                if (!isdigit(c) && v->pieceToChar.find(c) == std::string::npos)
+                    return false;
+            return !field.empty();
+        };
+        size_t moveCountIndex = sfenWithTransporterField ? 4 : 3;
+        if (!validHand(fenParts[2]) || !check_digit_field(fenParts[moveCountIndex]))
+            return FEN_INVALID_POCKET_INFO;
+
+        if (sfenWithTransporterField
+            && (v->transporterSquares ? !valid_sfen_transporter_field(fenParts[3], v)
+                                      : fenParts[3] != "-"))
+            return FEN_INVALID_POCKET_INFO;
+        return FEN_OK;
+    }
+
     // Castling and en passant can be skipped
-    bool skipCastlingAndEp = fenParts.size() >= 4 && fenParts.size() <= 5 && isdigit(fenParts[2][0]);
+    bool skipCastlingAndEp = sfenWithTransporterField || sfenWithoutTransporterField
+                          || (fenParts.size() >= 4 && fenParts.size() <= 5 && isdigit(fenParts[2][0]));
 
     // 3) Part
     // check castling rights

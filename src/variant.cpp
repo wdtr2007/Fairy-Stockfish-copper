@@ -793,7 +793,7 @@ namespace {
         return v;
     }
     // Base used for most shogi variants
-    Variant* minishogi_variant_base() {
+    Variant* small_shogi_variant_base() {
         Variant* v = variant_base()->init();
         v->variantTemplate = "shogi";
         v->maxRank = RANK_5;
@@ -827,23 +827,11 @@ namespace {
         v->perpetualCheckIllegal = true;
         return v;
     }
-    // Minishogi
-    // 5x5 variant of shogi
-    // https://en.wikipedia.org/wiki/Minishogi
-    Variant* minishogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
-        v->pieceToCharTable = "P.BR.S...G.+.++.+Kp.br.s...g.+.++.+k";
-        v->pocketSize = 5;
-        v->nFoldValue = -VALUE_MATE;
-        v->nFoldValueAbsolute = true;
-        v->nnueAlias = "minishogi";
-        return v;
-    }
     // Kyoto shogi
     // 5x5 variant of shogi with pieces alternating between promotion and demotion
     // https://en.wikipedia.org/wiki/Kyoto_shogi
     Variant* kyotoshogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->add_piece(LANCE, 'l');
         v->add_piece(SHOGI_KNIGHT, 'n');
         v->startFen = "p+nks+l/5/5/5/+LSK+NP[-] w 0 1";
@@ -887,7 +875,7 @@ namespace {
     // Educational shogi variant on a 3x4 board
     // https://en.wikipedia.org/wiki/D%C5%8Dbutsu_sh%C5%8Dgi
     Variant* dobutsu_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->pieceToCharTable = "C....E...G.+.....Lc....e...g.+.....l";
         v->pocketSize = 3;
         v->maxRank = RANK_4;
@@ -918,7 +906,7 @@ namespace {
     // Goro goro shogi
     // https://en.wikipedia.org/wiki/D%C5%8Dbutsu_sh%C5%8Dgi#Variation
     Variant* gorogoroshogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->pieceToCharTable = "P....S...G.+....+Kp....s...g.+....+k";
         v->pocketSize = 3;
         v->maxRank = RANK_6;
@@ -931,7 +919,7 @@ namespace {
     // Judkins shogi
     // https://en.wikipedia.org/wiki/Judkins_shogi
     Variant* judkinsshogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->pieceToCharTable = "PNBR.S...G.++++.+Kpnbr.s...g.++++.+k";
         v->maxRank = RANK_6;
         v->maxFile = FILE_F;
@@ -984,7 +972,7 @@ namespace {
     // EuroShogi
     // https://en.wikipedia.org/wiki/EuroShogi
     Variant* euroshogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->pieceToCharTable = "PNBR.....G.++++Kpnbr.....g.++++k";
         v->maxRank = RANK_8;
         v->maxFile = FILE_H;
@@ -1249,7 +1237,7 @@ namespace {
     // Shogi (Japanese chess)
     // https://en.wikipedia.org/wiki/Shogi
     Variant* shogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->maxRank = RANK_9;
         v->maxFile = FILE_I;
         v->add_piece(LANCE, 'l');
@@ -1259,6 +1247,32 @@ namespace {
         v->promotionRegion[BLACK] = Rank3BB | Rank2BB | Rank1BB;
         v->promotedPieceType[LANCE]        = GOLD;
         v->promotedPieceType[SHOGI_KNIGHT] = GOLD;
+        return v;
+    }
+    // Cshogi
+    // Shogi variant with new pieces and side-specific off-board transporters.
+    // The first bracket in startFen is the hand, the second is the transporter:
+    // White starts with a copper in hand; Black's copper is on Black's transporter.
+    // White's transporter is empty. The transporter squares are z0 (White) and y8 (Black) in USI.
+    Variant* cshogi_variant() {
+        Variant* v = shogi_variant()->init();
+        v->add_piece(CUSTOM_PIECE_1, 'c', "fFfWbW"); // copper
+        v->add_piece(CUSTOM_PIECE_2, 'm', "fR"); // mover
+        v->add_piece(CUSTOM_PIECE_3, 'x', "rlRfbW"); // side mover
+        v->add_piece(CUSTOM_PIECE_4, 'e', "FsfW"); // drunk elephant
+        v->startFen = "mnsgkgsnm/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/MNSGKGSNM[C][c] w 1";
+        v->promotedPieceType[CUSTOM_PIECE_1] = SILVER;
+        v->promotedPieceType[CUSTOM_PIECE_2] = CUSTOM_PIECE_3;
+        v->promotedPieceType[GOLD] = CUSTOM_PIECE_4;
+        v->transporterSquares = true;
+        v->pieceValue[MG][CUSTOM_PIECE_1] = 300;
+        v->pieceValue[EG][CUSTOM_PIECE_1] = 300;
+        v->pieceValue[MG][CUSTOM_PIECE_2] = LanceValueMg;
+        v->pieceValue[EG][CUSTOM_PIECE_2] = LanceValueEg;
+        v->pieceValue[MG][CUSTOM_PIECE_3] = 800;
+        v->pieceValue[EG][CUSTOM_PIECE_3] = 880;
+        v->pieceValue[MG][CUSTOM_PIECE_4] = 750;
+        v->pieceValue[EG][CUSTOM_PIECE_4] = 730;
         return v;
     }
     // Check-Shogi
@@ -1277,7 +1291,7 @@ namespace {
         v->remove_piece(KING);
         v->add_piece(COMMONER, 'k');
         v->add_piece(CUSTOM_PIECE_1, 'e', "FsfW"); // drunk elephant
-        v->startFen = "lnsgkgsnl/1r2e2b1/ppppppppp/9/9/9/PPPPPPPPP/1B2E2R1/LNSGKGSNL w 0 1";
+        v->startFen = "lnsgkgsnl/1r2e2b1/ppppppppp/9/9/9/PPPPPPPPP/1B2E2R1/LNSGKGSNL b 1";
         v->capturesToHand = false;
         v->pieceDrops = false;
         v->promotedPieceType[CUSTOM_PIECE_1] = COMMONER;
@@ -1305,7 +1319,7 @@ namespace {
         v->add_piece(CUSTOM_PIECE_3, 'r', "frlR"); // Yari rook
         v->add_piece(CUSTOM_PIECE_4, 'g', "WfFbR"); // Yari gold
         v->add_piece(CUSTOM_PIECE_5, 's', "fKbR"); // Yari silver
-        v->startFen = "rnnkbbr/7/ppppppp/7/7/7/PPPPPPP/7/RBBKNNR[-] w 0 1";
+        v->startFen = "rnnkbbr/7/ppppppp/7/7/7/PPPPPPP/7/RBBKNNR[-] b 1";
         v->promotionRegion[WHITE] = Rank7BB | Rank8BB | Rank9BB;
         v->promotionRegion[BLACK] = Rank3BB | Rank2BB | Rank1BB;
         v->promotedPieceType[SHOGI_PAWN] = CUSTOM_PIECE_5;
@@ -1328,7 +1342,7 @@ namespace {
     // Okisaki shogi
     // https://en.wikipedia.org/wiki/Okisaki_shogi
     Variant* okisakishogi_variant() {
-        Variant* v = minishogi_variant_base()->init();
+        Variant* v = small_shogi_variant_base()->init();
         v->maxRank = RANK_10;
         v->maxFile = FILE_J;
         v->add_piece(CUSTOM_PIECE_1, 'l', "vR"); // Vertical slider
@@ -1910,8 +1924,6 @@ void VariantMap::init() {
     add("shouse", shouse_variant());
     add("dragon", dragon_variant());
     add("paradigm", paradigm_variant());
-    add("minishogi", minishogi_variant());
-    add("mini", minishogi_variant());
     add("kyotoshogi", kyotoshogi_variant());
     add("micro", microshogi_variant());
     add("dobutsu", dobutsu_variant());
@@ -1937,6 +1949,7 @@ void VariantMap::init() {
     add("raazuvaa", raazuvaa_variant());
 #ifdef LARGEBOARDS
     add("shogi", shogi_variant());
+    add("cshogi", cshogi_variant());
     add("checkshogi", checkshogi_variant());
     add("shoshogi", shoshogi_variant());
     add("yarishogi", yarishogi_variant());
@@ -2002,14 +2015,6 @@ Variant* Variant::conclude() {
                   && !restrictedMobility
                   && !cambodianMoves
                   && !diagonalLines;
-    // Only moving a pinned piece can expose the king to an attack
-    fastLegal =  kingType == KING
-               && !restrictedMobility
-               && !cambodianMoves
-               && !diagonalLines
-               && !flyingGeneral
-               && !blastOnCapture
-               && wallingRule == NO_WALLING;
 
     // Initialize calculated NNUE properties
     nnueKing =  pieceTypes & KING ? KING

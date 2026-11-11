@@ -255,6 +255,7 @@ void MainThread::search() {
       && rootMoves[0].pv[0] != MOVE_NONE)
       bestThread = Threads.get_best_thread();
 
+  lastBestMove = bestThread->rootMoves[0].pv[0];
   bestPreviousScore = bestThread->rootMoves[0].score;
 
   // Send again PV info if we have a new best thread
@@ -305,7 +306,15 @@ void MainThread::search() {
   sync_cout << "bestmove " << UCI::move(rootPos, bestThread->rootMoves[0].pv[0]);
 
   if (bestThread->rootMoves[0].pv.size() > 1 || bestThread->rootMoves[0].extract_ponder_from_tt(rootPos))
-      std::cout << " ponder " << UCI::move(rootPos, bestThread->rootMoves[0].pv[1]);
+  {
+      Move bestMove = bestThread->rootMoves[0].pv[0];
+      Move ponderMove = bestThread->rootMoves[0].pv[1];
+      StateInfo st;
+      rootPos.do_move(bestMove, st, rootPos.gives_check(bestMove));
+      std::string ponderMoveString = UCI::move(rootPos, ponderMove);
+      rootPos.undo_move(bestMove);
+      std::cout << " ponder " << ponderMoveString;
+  }
 
   std::cout << sync_endl;
 }
@@ -822,6 +831,7 @@ namespace {
         if (    piecesCount <= TB::Cardinality
             && (piecesCount <  TB::Cardinality || depth >= TB::ProbeDepth)
             &&  pos.rule50_count() == 0
+            &&  Options["UCI_Variant"] == "chess"
             && !pos.can_castle(ANY_CASTLING))
         {
             TB::ProbeState err;
@@ -1122,6 +1132,35 @@ moves_loop: // When in check, search starts from here
           continue;
 
       ss->moveCount = ++moveCount;
+
+      
+      
+      // This is a debug output that prints the current depth, the move being considered, 
+      // and the current move number in the search. 
+      // It is only printed if we are at the root node, on the main thread, more than 3 seconds 
+      // have elapsed since the start of the search, and we are using a UCI dialect protocol.
+
+// This output is useful for monitoring the progress of the 
+// search and for debugging purposes.
+
+// besides the debug output, if we are at a PvNode, we set the pv pointer of the next stack frame to nullptr.
+// This is done to ensure that the PV line is not carried over to the next search depth,
+// which could lead to incorrect results.
+
+// The rest of the code initializes various variables related to the move being considered,
+// such as whether it is a capture or promotion, the piece being moved, 
+//and whether it
+// gives check. It also calculates the new depth for the search after making this move.
+// Finally, it performs pruning at shallow depths based on various heuristics,
+// and applies extensions to the search depth based on certain conditions.
+// The pruning and extension logic is designed to improve the efficiency of the search
+// by avoiding unnecessary searches and focusing on promising lines of play.
+//
+
+// a PvNode is a node in the search tree where we are trying to find the best move (the principal variation),
+// while a NonPV node is a node where we are only trying to determine 
+// whether a move
+//  
 
       if (rootNode && thisThread == Threads.main() && Time.elapsed() > 3000 && is_uci_dialect(CurrentProtocol))
           sync_cout << "info depth " << depth

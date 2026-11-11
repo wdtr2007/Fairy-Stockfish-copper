@@ -304,7 +304,8 @@ namespace {
         Bitboard b1 = b & target;
         Bitboard promotion_zone = pos.promotion_zone(Us);
         PieceType promPt = pos.promoted_piece_type(Pt);
-        Bitboard b2 = promPt && (!pos.promotion_limit(promPt) || pos.promotion_limit(promPt) > pos.count(Us, promPt)) ? b1 : Bitboard(0);
+        Bitboard b2 = promPt && !pos.is_promoted(from)
+                   && (!pos.promotion_limit(promPt) || pos.promotion_limit(promPt) > pos.count(Us, promPt)) ? b1 : Bitboard(0);
         Bitboard b3 = pos.piece_demotion() && pos.is_promoted(from) ? b1 : Bitboard(0);
         Bitboard pawnPromotions = (pos.promotion_pawn_types(Us) & Pt) ? (b & (Type == EVASIONS ? target : ~pos.pieces(Us)) & promotion_zone) : Bitboard(0);
         Bitboard epSquares = (pos.en_passant_types(Us) & Pt) ? (attacks & ~quiets & pos.ep_squares() & ~pos.pieces()) : Bitboard(0);
@@ -401,6 +402,8 @@ namespace {
 
         // Remove inaccessible squares (outside board + wall squares)
         target &= pos.board_bb();
+        if (pos.has_transporter_squares())
+            target &= ~(square_bb(pos.transporter_square(WHITE)) | square_bb(pos.transporter_square(BLACK)));
 
         moveList = generate_pawn_moves<Us, Type>(pos, moveList, target);
         for (PieceSet ps = pos.piece_types() & ~(piece_set(PAWN) | KING); ps;)
@@ -409,6 +412,30 @@ namespace {
         if (pos.piece_drops() && Type != CAPTURES && (pos.can_drop(Us, ALL_PIECES) || pos.two_boards()))
             for (PieceSet ps = pos.piece_types(); ps;)
                 moveList = generate_drops<Us, Type>(pos, moveList, pop_lsb(ps), target & ~pos.pieces(~Us));
+
+        // Only the side-to-move's transporter can be used (Black: y8, White: z0).
+        Square transporter = pos.transporter_square(pos.transporter_owner(Us));
+
+        // Pieces held on a transporter can return to any legal empty drop square.
+        if (pos.has_transporter_squares() && Type != CAPTURES && pos.transporter_piece(Us))
+        {
+            Piece pc = pos.transporter_piece(Us);
+            Bitboard b = target & ~pos.pieces() & pos.drop_region(Us, type_of(pc));
+            if (Type == QUIET_CHECKS)
+                b &= pos.check_squares(type_of(pc));
+            while (b)
+                *moveList++ = make<SPECIAL>(transporter, pop_lsb(b));
+        }
+
+        if (pos.has_transporter_squares() && !pos.transporter_piece(Us) && !pos.checkers()
+            && (Type == QUIETS || Type == NON_EVASIONS || Type == QUIET_CHECKS))
+            for (Bitboard b = pos.pieces(Us); b;)
+            {
+                Square from = pop_lsb(b);
+                if (type_of(pos.piece_on(from)) != KING
+                    && (Type != QUIET_CHECKS || (pos.blockers_for_king(~Us) & from)))
+                    *moveList++ = make<SPECIAL>(from, transporter);
+            }
 
         // Castling with non-king piece
         if (!pos.count<KING>(Us) && Type != CAPTURES && pos.can_castle(Us & ANY_CASTLING))
